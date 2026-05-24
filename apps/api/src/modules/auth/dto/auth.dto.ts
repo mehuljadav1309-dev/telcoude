@@ -34,6 +34,12 @@ export class RefreshTokenDto {
   refreshToken: string;
 }
 
+export class TelegramWebAppDto {
+  @ApiProperty({ description: 'Telegram WebApp initData string' })
+  @IsString()
+  initData: string;
+}
+
 export class LogoutDto {
   @ApiProperty()
   @IsString()

@@ -68,6 +68,9 @@ export const authApi = {
   verifyCode: (data: { phoneNumber: string; code: string; phoneCodeHash: string; password?: string }) =>
     api.post('/auth/verify-code', data),
 
+  telegramWebAppLogin: (initData: string) =>
+    api.post('/auth/telegram-webapp', { initData }),
+
   refresh: (refreshToken: string) =>
     api.post('/auth/refresh', { refreshToken }),
 

@@ -1,11 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { authApi } from '@/lib/api';
 import { useAuthStore } from '@/store';
-import { Loader2, Phone, KeyRound, ShieldAlert, ArrowRight } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { useTelegramWebApp } from '@/hooks/useTelegramWebApp';
+import { Loader2, Phone, KeyRound, ShieldAlert, ArrowRight, Smartphone, MessageCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 type AuthStep = 'phone' | 'code' | 'password';
@@ -14,6 +14,7 @@ export default function LoginPage() {
   const router = useRouter();
   const setAuth = useAuthStore((s) => s.setAuth);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const { isTelegram, initData, isReady, loginWithTelegram } = useTelegramWebApp();
 
   const [step, setStep] = useState<AuthStep>('phone');
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -21,12 +22,37 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [loading, setLoading] = useState(false);
+  const [tgLoggingIn, setTgLoggingIn] = useState(false);
   const [error, setError] = useState('');
+
+  // Auto-login via Telegram WebApp
+  useEffect(() => {
+    if (isTelegram && initData && isReady && !isAuthenticated) {
+      setTgLoggingIn(true);
+      loginWithTelegram().finally(() => setTgLoggingIn(false));
+    }
+  }, [isTelegram, initData, isReady, isAuthenticated, loginWithTelegram]);
 
   // Redirect if already authenticated
   if (isAuthenticated) {
     router.push('/drive');
     return null;
+  }
+
+  // Show Telegram WebApp auto-login loading
+  if (tgLoggingIn) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-background to-primary/5">
+        <div className="text-center">
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-primary/10 mb-6">
+            <MessageCircle className="w-10 h-10 text-primary animate-pulse" />
+          </div>
+          <h2 className="text-xl font-bold mb-2">Telegram Drive</h2>
+          <p className="text-muted-foreground mb-4">Authenticating via Telegram...</p>
+          <Loader2 className="w-6 h-6 animate-spin text-primary mx-auto" />
+        </div>
+      </div>
+    );
   }
 
   const handleSendCode = async (e: React.FormEvent) => {
@@ -129,6 +155,12 @@ export default function LoginPage() {
           <p className="text-muted-foreground mt-2">
             Cloud storage powered by your Telegram account
           </p>
+          {isTelegram && (
+            <span className="inline-flex items-center gap-1.5 mt-2 px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium">
+              <Smartphone className="w-3.5 h-3.5" />
+              Mini App mode
+            </span>
+          )}
         </div>
 
         {/* Auth Card */}
@@ -141,7 +173,7 @@ export default function LoginPage() {
                 </div>
                 <h2 className="text-lg font-semibold">Enter your phone number</h2>
                 <p className="text-sm text-muted-foreground mt-1">
-                  You'll receive a verification code via Telegram
+                  You&apos;ll receive a verification code via Telegram
                 </p>
               </div>
               <div>
@@ -264,9 +296,9 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="text-center text-xs text-muted-foreground mt-6">
-          Your Telegram credentials are encrypted end-to-end
-          <br />
-          and never stored in plain text
+          {isTelegram
+            ? 'Connected via Telegram Mini App'
+            : 'Your Telegram credentials are encrypted end-to-end'}
         </p>
       </div>
     </div>

@@ -1,52 +1,104 @@
 version: '3.8'
 
+# =============================================================================
+# Telegram Drive - Production Docker Compose
+# =============================================================================
+# Usage:
+#   Start all services:  docker compose up -d
+#   View logs:           docker compose logs -f
+#   Stop services:       docker compose down
+#
+# Environment variables (.env file required):
+#   TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BOT_TOKEN
+#   JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY
+#   DB_PASSWORD (optional, default: postgres)
+# =============================================================================
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &restart-policy
+  restart: unless-stopped
+
 services:
-  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 - Primary Database
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: tgdrive-postgres
-    restart: unless-stopped
+    <<: *restart-policy
     environment:
       POSTGRES_DB: telegram_drive
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d telegram_drive"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging: *default-logging
     networks:
       - tgdrive-network
 
-  # Redis for Queue & Caching
+  # ---------------------------------------------------------------------------
+  # Redis 7 - Cache & Queue Backend
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: tgdrive-redis
-    restart: unless-stopped
+    <<: *restart-policy
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
+    command: >
+      redis-server 
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout: 5s
+      timeout: 3s
       retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging: *default-logging
     networks:
       - tgdrive-network
 
-  # Backend API
+  # ---------------------------------------------------------------------------
+  # Backend API (NestJS)
+  # ---------------------------------------------------------------------------
   api:
     build:
       context: .
       target: api
+      cache_from:
+        - ghcr.io/mehuljadav1309-dev/telcoude-api:latest
+    image: tgdrive-api:latest
     container_name: tgdrive-api
-    restart: unless-stopped
+    <<: *restart-policy
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,47 +108,84 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 4000
       HOST: 0.0.0.0
-      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/telegram_drive
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/telegram_drive?sslmode=disable&connection_limit=20
+      DATABASE_POOL_MIN: 2
+      DATABASE_POOL_MAX: 10
       REDIS_URL: redis://redis:6379
+      REDIS_PREFIX: tgdrive
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_EXPIRY: 15m
+      JWT_REFRESH_EXPIRY: 7d
+      JWT_ISSUER: telegram-drive
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_MAX_FILE_SIZE: 2097152000
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://telegramdrive.app}
+      RATE_LIMIT_TTL: 60
+      RATE_LIMIT_MAX: 100
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      STORAGE_MAX_PER_USER: 5368709120
     ports:
       - "4000:4000"
     volumes:
       - tgdrive-sessions:/app/data/sessions
       - tgdrive-uploads:/app/data/uploads
+      - tgdrive-temp:/tmp
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+    logging: *default-logging
     networks:
       - tgdrive-network
 
-  # Frontend Web
+  # ---------------------------------------------------------------------------
+  # Frontend Web (Next.js)
+  # ---------------------------------------------------------------------------
   web:
     build:
       context: .
       target: web
+      cache_from:
+        - ghcr.io/mehuljadav1309-dev/telcoude-web:latest
+    image: tgdrive-web:latest
     container_name: tgdrive-web
-    restart: unless-stopped
+    <<: *restart-policy
     depends_on:
       - api
     environment:
       NODE_ENV: ${NODE_ENV:-production}
-      NEXT_PUBLIC_API_URL: ${API_URL:-http://api:4000}
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-https://api.telegramdrive.app}
+      NEXT_PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-https://telegramdrive.app}
     ports:
       - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    logging: *default-logging
     networks:
       - tgdrive-network
 
-  # Background Worker
+  # ---------------------------------------------------------------------------
+  # Background Worker (BullMQ)
+  # ---------------------------------------------------------------------------
   worker:
     build:
       context: .
       target: worker
+      cache_from:
+        - ghcr.io/mehuljadav1309-dev/telcoude-worker:latest
+    image: tgdrive-worker:latest
     container_name: tgdrive-worker
-    restart: unless-stopped
+    <<: *restart-policy
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,39 +193,109 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: ${NODE_ENV:-production}
-      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/telegram_drive
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/telegram_drive?sslmode=disable
       REDIS_URL: redis://redis:6379
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       BULLMQ_CONCURRENCY: ${BULLMQ_CONCURRENCY:-5}
     volumes:
       - tgdrive-sessions:/app/data/sessions
       - tgdrive-uploads:/app/data/uploads
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging: *default-logging
     networks:
       - tgdrive-network
 
+  # ---------------------------------------------------------------------------
   # Nginx Reverse Proxy
+  # ---------------------------------------------------------------------------
   nginx:
     image: nginx:alpine
     container_name: tgdrive-nginx
-    restart: unless-stopped
+    <<: *restart-policy
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
-      - ./nginx/ssl:/etc/nginx/ssl
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-cache:/var/cache/nginx
     depends_on:
       - api
       - web
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    logging: *default-logging
+    networks:
+      - tgdrive-network
+
+  # ---------------------------------------------------------------------------
+  # pgAdmin (Optional - Database Management)
+  # ---------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: tgdrive-pgadmin
+    <<: *restart-policy
+    profiles:
+      - dev
+      - admin
+    depends_on:
+      - postgres
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@telegramdrive.app}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - tgdrive-network
+
+  # ---------------------------------------------------------------------------
+  # Redis Commander (Optional - Redis Management)
+  # ---------------------------------------------------------------------------
+  redis-commander:
+    image: ghcr.io/joeferner/redis-commander:latest
+    container_name: tgdrive-redis-commander
+    <<: *restart-policy
+    profiles:
+      - dev
+      - admin
+    depends_on:
+      - redis
+    environment:
+      REDIS_HOSTS: "local:redis:6379"
+    ports:
+      - "8081:8081"
     networks:
       - tgdrive-network
 
 volumes:
   postgres-data:
+    driver: local
   redis-data:
+    driver: local
   tgdrive-sessions:
+    driver: local
   tgdrive-uploads:
+    driver: local
+  tgdrive-temp:
+    driver: local
+  nginx-cache:
+    driver: local
+  pgadmin-data:
+    driver: local
 
 networks:
   tgdrive-network:

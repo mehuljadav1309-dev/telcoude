@@ -12,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
-import { SendCodeDto, VerifyCodeDto, RefreshTokenDto, LogoutDto } from './dto/auth.dto';
+import { SendCodeDto, VerifyCodeDto, RefreshTokenDto, LogoutDto, TelegramWebAppDto } from './dto/auth.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Throttle } from '@nestjs/throttler';
@@ -44,6 +44,18 @@ export class AuthController {
     @Ip() ipAddress: string,
   ) {
     return this.authService.verifyCode(verifyCodeDto, userAgent, ipAddress);
+  }
+
+  @Post('telegram-webapp')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @ApiOperation({ summary: 'Login via Telegram WebApp' })
+  @ApiBody({ type: TelegramWebAppDto })
+  async loginWebApp(
+    @Body() dto: TelegramWebAppDto,
+    @Headers('user-agent') userAgent: string,
+    @Ip() ipAddress: string,
+  ) {
+    return this.authService.loginWithWebApp(dto.initData, userAgent, ipAddress);
   }
 
   @Post('refresh')

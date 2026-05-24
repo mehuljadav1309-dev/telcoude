@@ -1,0 +1,15 @@
+node_modules/
+.git/
+.gitignore
+.env
+.env.local
+*.log
+dist/
+.next/
+.turbo/
+coverage/
+data/
+docker-data/
+*.md
+.DS_Store
+.gitkeep

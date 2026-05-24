@@ -1,0 +1,103 @@
+# =============================================================================
+# Telegram Drive - Minimal Docker Compose (No Nginx, for Railway/Fly.io)
+# =============================================================================
+# For platforms like Railway that provide their own reverse proxy.
+# Usage: docker compose -f docker-compose.minimal.yml up
+# =============================================================================
+
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tgdrive-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: telegram_drive
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: tgdrive-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      target: api
+    container_name: tgdrive-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-4000}
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/telegram_drive
+      REDIS_URL: redis://redis:6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    ports:
+      - "${PORT:-4000}:${PORT:-4000}"
+
+  web:
+    build:
+      context: .
+      target: web
+    container_name: tgdrive-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+      NEXT_PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-http://localhost:3000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+  worker:
+    build:
+      context: .
+      target: worker
+    container_name: tgdrive-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/telegram_drive
+      REDIS_URL: redis://redis:6379
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      BULLMQ_CONCURRENCY: ${BULLMQ_CONCURRENCY:-5}
+
+volumes:
+  postgres-data:
+  redis-data:

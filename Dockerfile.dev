@@ -1,0 +1,20 @@
+FROM node:20-alpine AS base
+RUN apk add --no-cache python3 make g++ ffmpeg && \
+    corepack enable && corepack prepare pnpm@9 --activate
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml turbo.json tsconfig.json ./
+COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
+COPY apps/worker/package.json apps/worker/
+COPY packages/database/package.json packages/database/
+COPY packages/shared/package.json packages/shared/
+COPY packages/telegram/package.json packages/telegram/
+
+RUN pnpm install
+
+COPY . .
+
+RUN cd packages/database && npx prisma generate
+
+EXPOSE 4000 3000

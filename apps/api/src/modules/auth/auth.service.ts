@@ -3,15 +3,18 @@ import {
   UnauthorizedException,
   ConflictException,
   Logger,
+  BadRequestException,
+  HttpException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../database/prisma.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { CryptoService } from './services/crypto.service';
-import { SendCodeDto, VerifyCodeDto, LoginResponseDto } from './dto/auth.dto';
+import { SendCodeDto, VerifyCodeDto, LoginResponseDto, TelegramWebAppDto } from './dto/auth.dto';
 import * as bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class AuthService {
@@ -47,6 +50,112 @@ export class AuthService {
         );
       }
       throw new UnauthorizedException('Failed to send verification code. Please try again.');
+    }
+  }
+
+  async loginWithWebApp(initData: string, deviceInfo?: string, ipAddress?: string) {
+    this.logger.log('Processing Telegram WebApp login');
+
+    try {
+      // Verify the WebApp initData HMAC signature
+      const botToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
+      if (!botToken) {
+        throw new BadRequestException('Telegram Bot not configured');
+      }
+
+      // Parse initData
+      const params = new URLSearchParams(initData);
+      const hash = params.get('hash');
+      const authDate = params.get('auth_date');
+      const userJson = params.get('user');
+
+      if (!hash || !authDate || !userJson) {
+        throw new BadRequestException('Invalid initData');
+      }
+
+      // Check auth_date is not too old (24 hours)
+      const authTimestamp = parseInt(authDate, 10);
+      if (Date.now() / 1000 - authTimestamp > 86400) {
+        throw new UnauthorizedException('Session expired');
+      }
+
+      // Verify HMAC-SHA256 signature
+      const secretKey = crypto.createHmac('sha256', 'WebAppData')
+        .update(botToken)
+        .digest();
+
+      // Build data check string
+      const checkStrings: string[] = [];
+      const sortedParams = Array.from(params.entries())
+        .filter(([k]) => k !== 'hash')
+        .sort(([a], [b]) => a.localeCompare(b));
+
+      for (const [key, value] of sortedParams) {
+        checkStrings.push(`${key}=${value}`);
+      }
+      const dataCheckString = checkStrings.join('\n');
+
+      const computedHash = crypto.createHmac('sha256', secretKey)
+        .update(dataCheckString)
+        .digest('hex');
+
+      if (computedHash !== hash) {
+        throw new UnauthorizedException('Invalid signature');
+      }
+
+      // Extract user data
+      const userData = JSON.parse(userJson);
+      const telegramId = BigInt(userData.id);
+
+      // Find or create user
+      let user = await this.prisma.user.findUnique({
+        where: { telegramId },
+      });
+
+      if (!user) {
+        user = await this.prisma.user.create({
+          data: {
+            telegramId,
+            phoneNumber: null,
+            firstName: userData.first_name || '',
+            lastName: userData.last_name || '',
+            username: userData.username || '',
+          },
+        });
+        this.logger.log(`Created user from WebApp: ${user.id}`);
+      } else {
+        user = await this.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            firstName: userData.first_name || user.firstName,
+            lastName: userData.last_name || user.lastName,
+            username: userData.username || user.username,
+          },
+        });
+      }
+
+      // Generate tokens
+      const sessionId = uuidv4();
+      const tokens = await this.generateTokens(user.id, user.telegramId.toString(), sessionId);
+
+      // Log activity
+      await this.prisma.activityLog.create({
+        data: {
+          userId: user.id,
+          action: 'WEBAPP_LOGIN',
+          details: { method: 'telegram_webapp', deviceInfo },
+          ipAddress,
+        },
+      });
+
+      return {
+        user: this.sanitizeUser(user),
+        ...tokens,
+      };
+    } catch (error: any) {
+      this.logger.error(`WebApp login failed: ${error.message}`);
+      if (error instanceof HttpException) throw error;
+      throw new UnauthorizedException('WebApp authentication failed');
     }
   }
 

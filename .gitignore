@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.next/
+.env
+.env.local
+*.log
+data/
+.turbo
+coverage/
+.turbo/
+*.tsbuildinfo
+.next/
+docker-data/
+.DS_Store
+*.pem
